@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -9,6 +9,26 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    
+    // https://ziggit.dev/t/how-to-use-openssl-zig-library/6575/3
+    // mosquitto.addIncludePath(b.path("openssl"));
+    const openssl_dep = b.dependency("openssl", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const libcrypto = openssl_dep.artifact("crypto");
+    const libssl = openssl_dep.artifact("ssl");
+
+    for(libcrypto.root_module.include_dirs.items) |include_dir| {
+        try mosquitto.root_module.include_dirs.append(b.allocator, include_dir);
+    }
+
+    mosquitto.addIncludePath(b.path("openssl"));
+
+    // Try system lib
+    //mosquitto.linkSystemLibrary("openssl");
+
 
     // ziglang 0.13.0 https://github.com/ziglang/zig/pull/19597
     mosquitto.addIncludePath(b.path("mosquitto"));
@@ -97,6 +117,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const mosquitto_flags = [_][]const u8{
+        "-DWITH_TLS",
         "-DWITH_BROKER",
         "-DWITH_PERSISTENCE",
         "-DVERSION=\"2.0.18\"",
@@ -109,6 +130,9 @@ pub fn build(b: *std.Build) void {
         .flags = &mosquitto_flags,
     });
     mosquitto.linkLibC();
+
+    mosquitto.linkLibrary(libssl);
+    mosquitto.linkLibrary(libcrypto);
 
     b.installArtifact(mosquitto);
 }
