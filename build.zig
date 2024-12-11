@@ -1,5 +1,9 @@
 const std = @import("std");
 
+// References
+// * https://github.com/ziglibs/positron/blob/master/build.zig
+// * https://ziggit.dev/t/c-import-failed-for-wolfssl/6437/4
+
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -10,24 +14,24 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
-    
-    // https://ziggit.dev/t/how-to-use-openssl-zig-library/6575/3
-    // mosquitto.addIncludePath(b.path("openssl"));
-    const openssl_dep = b.dependency("openssl", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const libcrypto = openssl_dep.artifact("crypto");
-    const libssl = openssl_dep.artifact("ssl");
+    const ZigWolfSSL = @import("vendor/wolfssl/build.zig");
+    const wolfssl = ZigWolfSSL.createWolfSSL(b, target, optimize);
 
-    for(libcrypto.root_module.include_dirs.items) |include_dir| {
-        try mosquitto.root_module.include_dirs.append(b.allocator, include_dir);
-    }
+    // const c = @cImport({
+    //     @cInclude("wolfssl/options.h");
+    //     @cInclude("wolfssl/wolfcrypt/settings.h");
+    //
+    //     # Workaround: Use a manual define due to an incorrect translation/conversion
+    //     # of the type XSTAT in XSTAT_TYPE define
+    //     # See post https://ziggit.dev/t/c-import-failed-for-wolfssl/6437/3
+    //     # Scheduled to be fixed in zig 0.14.0.
+    //     # Issue: https://github.com/ziglang/zig/issues/21746
+    //     @cDefine("XSTAT_TYPE", "struct stat");
+    // 
+    //     @cInclude("wolfssl/ssl.h");
+    // });
 
-    mosquitto.addIncludePath(b.path("openssl"));
-
-    // Try system lib
-    //mosquitto.linkSystemLibrary("openssl");
+    mosquitto.addIncludePath(b.path("vendor/wolfssl/vendor/wolfssl"));
 
 
     // ziglang 0.13.0 https://github.com/ziglang/zig/pull/19597
@@ -131,8 +135,7 @@ pub fn build(b: *std.Build) !void {
     });
     mosquitto.linkLibC();
 
-    mosquitto.linkLibrary(libssl);
-    mosquitto.linkLibrary(libcrypto);
+    mosquitto.linkLibrary(wolfssl);
 
     b.installArtifact(mosquitto);
 }
