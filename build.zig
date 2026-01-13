@@ -36,6 +36,9 @@ pub fn build(b: *std.Build) !void {
     exe.addIncludePath(sqlite_dep.path("."));
     exe.addCSourceFile(.{ .file = sqlite_dep.path("sqlite3.c"), .flags = &.{} });
 
+    const microhttpd = b.dependency("microhttpd", .{});
+    exe.addIncludePath(microhttpd.path("./src/include"));
+
     // Enable openssl
     if (with_tls) {
         const openssl = b.dependency("openssl", .{ .target = target, .optimize = optimize });
@@ -112,8 +115,8 @@ pub fn build(b: *std.Build) !void {
         "mosquitto/src/handle_publish.c",
         "mosquitto/src/handle_subscribe.c",
         "mosquitto/src/handle_unsubscribe.c",
-        // "mosquitto/src/http_api.c",
-        // "mosquitto/src/http_serv.c",
+        "mosquitto/src/http_api.c",
+        "mosquitto/src/http_serv.c",
         "mosquitto/src/keepalive.c",
         "mosquitto/src/listeners.c",
         "mosquitto/src/logging.c",
@@ -190,6 +193,7 @@ pub fn build(b: *std.Build) !void {
     try mosquitto_broker_flags.append("-DWITH_BRIDGE");
     try mosquitto_broker_flags.append("-DWITH_PERSISTENCE");
     try mosquitto_broker_flags.append("-DWITH_SQLITE");
+    // try mosquitto_broker_flags.append("-DWITH_HTTP_API");
 
     // version
     const version_flag = try std.fmt.allocPrint(alloc, "-DVERSION=\"{s}\"", .{version});
