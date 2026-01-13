@@ -111,3 +111,16 @@ The following items are still yet to be addressed/fixed:
 
 * [ ] Mosquitto version should not be hardcoded
 * [ ] Support for other init systems like OpenRC, SysVInit, s6-overlay
+
+## Building mosquitto develop branch
+
+mosquitto is working on the next major version which is currently only available on the `develop` branch.
+
+```sh
+just checkout-mosquitto-branch
+just build-all
+```
+
+**TODO**
+
+* [ ] Build fails when using WITH_TLS=false (due to mosquitto build bug)

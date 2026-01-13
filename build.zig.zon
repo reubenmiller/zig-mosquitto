@@ -9,9 +9,21 @@
         "README.md",
     },
     .dependencies = .{
+        .cjson = .{
+            .url = "https://github.com/DaveGamble/cJSON/archive/refs/tags/v1.7.18.tar.gz",
+            .hash = "N-V-__8AAEtUEwCjxN-pP2y-8gqgzBd8fevALO1YhSDa1KtX",
+        },
+        .microhttpd = .{
+            .url = "https://ftp.gnu.org/gnu/libmicrohttpd/libmicrohttpd-1.0.2.tar.gz",
+            .hash = "N-V-__8AAFovswBPTQ0MmfBG-glcX_wDwfmfX7WJI_1LZGaf",
+        },
+        .sqlite = .{
+            .url = "https://sqlite.org/2026/sqlite-amalgamation-3510200.zip",
+            .hash = "N-V-__8AALNmqgBz73I7J8GlQS_kCPTRgxS0rm8gXcEM8Evk",
+        },
         .openssl = .{
             .url = "https://github.com/dzfrias/openssl-zig/archive/refs/heads/main.tar.gz",
-            .hash = "openssl-3.4.0-AAAAAJbeAABDKzRsuNqkIz475RzzA6y5o1R-LoEZumHo",
-        }
-    }
+            .hash = "openssl-3.6.0-YymhPrUoAQCKRYLwvQUcGnmdVPu-fBBsq37GSaIx0ZMy",
+        },
+    },
 }

@@ -4,7 +4,10 @@ set dotenv-load
 PACKAGE_NAME := env("PACKAGE_NAME", "tedge-mosquitto")
 
 # package version
-VERSION := env("VERSION", "2.0.18")
+VERSION := env("VERSION", "2.2.0")
+
+# mosquitto source branch
+BRANCH := env("BRANCH", "develop")
 
 # package version release suffix
 REVISION := env("REVISION", "1")
@@ -29,6 +32,13 @@ checkout-mosquitto version=VERSION:
     tar -xzf mosquitto-{{version}}.tar.gz
     ln -sf mosquitto-{{version}} mosquitto
     rm -f mosquitto-{{version}}.tar.gz
+
+# checkout the mosquitto source code from a branch
+checkout-mosquitto-branch branch=BRANCH:
+    wget https://github.com/eclipse-mosquitto/mosquitto/archive/refs/heads/{{branch}}.tar.gz -O mosquitto-{{BRANCH}}.tar.gz
+    tar -xzf mosquitto-{{branch}}.tar.gz
+    ln -sf mosquitto-{{branch}} mosquitto
+    rm -f mosquitto-{{branch}}.tar.gz
 
 # build the binary without tls
 build-notls target=TARGET package_arch=PACKAGE_TARGET:
