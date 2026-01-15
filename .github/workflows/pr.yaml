@@ -61,6 +61,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
+          name: mosquitto-${{ matrix.job.version }}
           path: dist/*.*
 
   check-build:
