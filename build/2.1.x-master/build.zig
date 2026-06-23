@@ -21,6 +21,13 @@ const OpensslLink = struct {
     // shared: the converted shared libraries, linked dynamically.
     ssl_so: ?std.Build.LazyPath = null,
     crypto_so: ?std.Build.LazyPath = null,
+    // Debian-style multiarch triple (e.g. "aarch64-linux-gnu") used to add the
+    // distro's arch-specific lib dir to the rpath as a system fallback. null when
+    // OpenSSL is not linked dynamically (static mode).
+    multiarch: ?[]const u8 = null,
+    // Whether the target is 64-bit (controls the lib64 fallback used by the RPM
+    // family: Fedora / RHEL / Amazon Linux / openSUSE).
+    lib64: bool = false,
 
     fn apply(self: OpensslLink, m: *std.Build.Module) void {
         switch (self.mode) {
@@ -41,12 +48,35 @@ const OpensslLink = struct {
                 m.addRPathSpecial("$ORIGIN/lib"); // archive layout: binary at root, libs in lib/
                 m.addRPathSpecial("$ORIGIN/../lib/mosquitto"); // package layout: /usr/bin -> /usr/lib/mosquitto
                 m.addRPathSpecial("/usr/lib/mosquitto");
+                self.addSystemFallbackRpaths(m);
             },
             .system => {
                 m.linkSystemLibrary("ssl", .{});
                 m.linkSystemLibrary("crypto", .{});
+                self.addSystemFallbackRpaths(m);
             },
         }
+    }
+
+    // Add the common distro lib dirs to the rpath so the system OpenSSL is found
+    // as a fallback without needing LD_LIBRARY_PATH. These come AFTER the packaged
+    // paths, so a shipped .so still wins, and any dir that doesn't exist on a
+    // given distro is simply skipped by the loader. Covers:
+    //   - Debian/Ubuntu multiarch:        /usr/lib/<triple>, /lib/<triple>
+    //   - RPM family (Fedora/RHEL/AL/SUSE): /usr/lib64, /lib64  (64-bit only)
+    //   - Arch/Alpine/generic & 32-bit:    /usr/lib, /lib
+    fn addSystemFallbackRpaths(self: OpensslLink, m: *std.Build.Module) void {
+        const b = m.owner;
+        if (self.multiarch) |ma| {
+            m.addRPathSpecial(b.fmt("/usr/lib/{s}", .{ma}));
+            m.addRPathSpecial(b.fmt("/lib/{s}", .{ma}));
+        }
+        if (self.lib64) {
+            m.addRPathSpecial("/usr/lib64");
+            m.addRPathSpecial("/lib64");
+        }
+        m.addRPathSpecial("/usr/lib");
+        m.addRPathSpecial("/lib");
     }
 };
 
@@ -138,10 +168,17 @@ pub fn build(b: *std.Build) !void {
     // once and shared by all binaries: in 'static' mode each statically links it;
     // in 'shared' mode it is converted to .so files all binaries link; in
     // 'system' mode no OpenSSL is built (the target's system OpenSSL is used).
+    // Debian-style multiarch triple (arch-linux-abi, e.g. aarch64-linux-gnu),
+    // used as a system-OpenSSL fallback rpath for the dynamically-linked modes.
+    const multiarch = b.fmt("{s}-linux-{s}", .{
+        @tagName(target.result.cpu.arch),
+        @tagName(target.result.abi),
+    });
+    const lib64 = target.result.ptrBitWidth() == 64;
     var openssl_link: ?OpensslLink = null;
     if (with_tls) {
         switch (openssl_mode) {
-            .system => openssl_link = .{ .mode = .system },
+            .system => openssl_link = .{ .mode = .system, .multiarch = multiarch, .lib64 = lib64 },
             .static => {
                 const openssl = b.dependency("openssl", .{ .target = target, .optimize = optimize });
                 const libssl = openssl.artifact("ssl");
@@ -164,6 +201,8 @@ pub fn build(b: *std.Build) !void {
                     .include_tree = libssl.getEmittedIncludeTree(),
                     .ssl_so = ssl_so,
                     .crypto_so = crypto_so,
+                    .multiarch = multiarch,
+                    .lib64 = lib64,
                 };
                 b.getInstallStep().dependOn(&b.addInstallLibFile(crypto_so, "libcrypto.so.3").step);
                 b.getInstallStep().dependOn(&b.addInstallLibFile(ssl_so, "libssl.so.3").step);

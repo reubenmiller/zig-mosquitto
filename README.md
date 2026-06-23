@@ -49,6 +49,12 @@ The mosquitto source code is downloaded automatically using the ziglang build sy
     just VERSION=2.0.22 WITH_TLS=false build
     ```
 
+    Or build the binaries but dynamically link the openssl to avoid embedding it into each binary:
+
+    ```sh
+    OPENSSL=shared VERSION=2.1.x-master just build WITH_TLS=true
+    ```
+
 3. Use the build linux packages under the `dist/` folder
 
     ```sh
