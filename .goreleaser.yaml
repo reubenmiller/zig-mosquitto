@@ -49,6 +49,37 @@ builds:
   - #
     id: mosquitto-upx-armv6
     <<: *build-armv6
+  #
+  # GNU libc (dynamically linked) builds
+  #
+  - &build-gnu
+    id: mosquitto-gnu
+    builder: zig
+    binary: mosquitto
+    targets:
+      # Zig defaults to glibc 2.17 for x86_64/aarch64/arm and 2.27 for riscv64,
+      # which are already conservative maximally-compatible minimums.
+      - x86_64-linux-gnu
+      - aarch64-linux-gnu
+      - arm-linux-gnueabihf
+      - riscv64-linux-gnu
+    dir: ./current
+    tool: zig
+    flags:
+      - --release=small
+      - -Doptimize=ReleaseSmall
+      - -DWITH_TLS={{ eq (envOrDefault "WITH_TLS" "true") "true" }}
+  - &build-gnu-armv6
+    # armv6 gnu
+    id: mosquitto-gnu-armv6
+    <<: *build-gnu
+    targets:
+      - arm-linux-gnueabi
+    flags:
+      - --release=small
+      - -Doptimize=ReleaseSmall
+      - -DWITH_TLS={{ eq (envOrDefault "WITH_TLS" "true") "true" }}
+      - -Dcpu=arm1176jzf_s
 
 archives:
   - id: mosquitto-archive
@@ -79,6 +110,38 @@ archives:
     formats:
       - tar.gz
     name_template: '{{ envOrDefault "PACKAGE_NAME" .ProjectName }}-upx_{{ .Env.VERSION }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ .Arm }}{{ end }}v6{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+
+  # gnu libc archives
+  - id: mosquitto-archive-gnu
+    ids:
+      - mosquitto-gnu
+    formats:
+      - tar.gz
+    name_template: '{{ envOrDefault "PACKAGE_NAME_GNU" (print (envOrDefault "PACKAGE_NAME" .ProjectName) "-gnu") }}_{{ .Env.VERSION }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ .Arm }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+    files: &plugin-so-files
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_dynamic_security.so'
+        dst: lib/
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_persist_sqlite.so'
+        dst: lib/
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_acl_file.so'
+        dst: lib/
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_password_file.so'
+        dst: lib/
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_sparkplug_aware.so'
+        dst: lib/
+        strip_parent: true
+
+  - id: mosquitto-archive-gnu-armv6
+    ids:
+      - mosquitto-gnu-armv6
+    formats:
+      - tar.gz
+    name_template: '{{ envOrDefault "PACKAGE_NAME_GNU" (print (envOrDefault "PACKAGE_NAME" .ProjectName) "-gnu") }}_{{ .Env.VERSION }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ .Arm }}{{ end }}v6{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+    files: *plugin-so-files
 
 nfpms:
   # note that this is an array of nfpm configs
@@ -127,24 +190,34 @@ nfpms:
 
     # Contents to add to the package.
     # GoReleaser will automatically add the binaries.
-    contents:
-      - src: packaging/conf/certs/README
+    #
+    # NOTE: plugins are intentionally NOT shipped here. The musl builds are fully
+    # statically linked, and musl does not support dlopen() from a static binary,
+    # so plugins cannot be loaded. Plugin .so files are only added to the GNU
+    # (dynamically linked) packages below via *nfpm-common-contents + plugins.
+    contents: &nfpm-common-contents
+      - &content-certs-readme
+        src: packaging/conf/certs/README
         dst: /etc/mosquitto/certs/README
         type: config
 
-      - src: packaging/conf/ca_certificates/README
+      - &content-ca-certificates-readme
+        src: packaging/conf/ca_certificates/README
         dst: /etc/mosquitto/ca_certificates/README
         type: config
 
-      - src: packaging/conf/mosquitto.conf
+      - &content-mosquitto-conf
+        src: packaging/conf/mosquitto.conf
         dst: /etc/mosquitto/mosquitto.conf
         type: config
 
-      - src: packaging/conf/conf.d/README
+      - &content-confd-readme
+        src: packaging/conf/conf.d/README
         dst: /etc/mosquitto/conf.d/README
         type: config
 
-      - dst: /var/lib/mosquitto
+      - &content-var-lib
+        dst: /var/lib/mosquitto
         type: dir
         file_info:
           owner: mosquitto
@@ -152,13 +225,15 @@ nfpms:
           mode: 700
 
       # systemd definition
-      - src: packaging/services/systemd/mosquitto.service
+      - &content-systemd
+        src: packaging/services/systemd/mosquitto.service
         dst: /usr/lib/systemd/system/mosquitto.service
         file_info:
           mode: 0644
 
       # sysvinit definition
-      - src: packaging/services/sysvinit/mosquitto
+      - &content-sysvinit
+        src: packaging/services/sysvinit/mosquitto
         dst: /usr/lib/tedge-services/sysvinit/mosquitto
         file_info:
           mode: 0755
@@ -175,6 +250,53 @@ nfpms:
     id: mosquitto-linux-packages-arvm6
     ids:
       - mosquitto-armv6
+    file_name_template: '{{ .PackageName }}_{{ .Env.VERSION }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}v6{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+
+  # gnu libc packages
+  - &linux-gnu-package-defaults
+    <<: *linux-package-defaults
+    id: mosquitto-gnu-linux-packages
+    ids:
+      - mosquitto-gnu
+    package_name: '{{ envOrDefault "PACKAGE_NAME_GNU" (print (envOrDefault "PACKAGE_NAME" .ProjectName) "-gnu") }}'
+    file_name_template: '{{ .PackageName }}_{{ .Env.VERSION }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+    # GNU builds are dynamically linked, so dlopen()'d plugins can resolve the
+    # broker's exported symbols (build.zig sets rdynamic). Ship the plugin .so
+    # files alongside the shared common contents.
+    #
+    # YAML merge keys (<<) cannot concatenate sequences, so the common items are
+    # referenced individually via their anchors from *linux-package-defaults.
+    contents:
+      # mosquitto plugins — each target's .so files live in zig-out/<target>/lib/
+      # because goreleaser passes -p zig-out/<target> to zig build.
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_dynamic_security.so'
+        dst: /usr/lib/mosquitto/mosquitto_dynamic_security.so
+
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_persist_sqlite.so'
+        dst: /usr/lib/mosquitto/mosquitto_persist_sqlite.so
+
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_acl_file.so'
+        dst: /usr/lib/mosquitto/mosquitto_acl_file.so
+
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_password_file.so'
+        dst: /usr/lib/mosquitto/mosquitto_password_file.so
+
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_sparkplug_aware.so'
+        dst: /usr/lib/mosquitto/mosquitto_sparkplug_aware.so
+
+      - *content-certs-readme
+      - *content-ca-certificates-readme
+      - *content-mosquitto-conf
+      - *content-confd-readme
+      - *content-var-lib
+      - *content-systemd
+      - *content-sysvinit
+
+  - #
+    <<: *linux-gnu-package-defaults
+    id: mosquitto-gnu-linux-packages-armv6
+    ids:
+      - mosquitto-gnu-armv6
     file_name_template: '{{ .PackageName }}_{{ .Env.VERSION }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}v6{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
 
 upx:

@@ -11,3 +11,4 @@ build/*/packaging
 build/*/zig-out
 build/*/zig-pkg
 /current
+.goreleaser.generated.yaml
