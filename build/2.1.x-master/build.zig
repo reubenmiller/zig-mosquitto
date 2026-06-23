@@ -1,6 +1,77 @@
 const std = @import("std");
 const zon = @import("build.zig.zon");
 
+// How OpenSSL is linked into the broker, plugins and tools.
+//   - static (default): the vendored OpenSSL is statically linked into every
+//     binary — fully self-contained but ~3MB of OpenSSL per binary.
+//   - shared: the vendored static OpenSSL is converted into shared libcrypto.so
+//     /libssl.so (one copy, shipped alongside the binaries and found via rpath)
+//     so all binaries share it. Self-contained AND small; works cross-compiled.
+//   - system: link the target's system libssl/libcrypto (smallest; runtime must
+//     provide OpenSSL). Relies on pkg-config, so it is native-build only.
+const OpensslMode = enum { static, shared, system };
+
+const OpensslLink = struct {
+    mode: OpensslMode,
+    // headers: vendored include tree (static/shared). null for system (pkg-config).
+    include_tree: ?std.Build.LazyPath = null,
+    // static: vendored static libraries linked directly into each binary.
+    libssl: ?*std.Build.Step.Compile = null,
+    libcrypto: ?*std.Build.Step.Compile = null,
+    // shared: the converted shared libraries, linked dynamically.
+    ssl_so: ?std.Build.LazyPath = null,
+    crypto_so: ?std.Build.LazyPath = null,
+
+    fn apply(self: OpensslLink, m: *std.Build.Module) void {
+        switch (self.mode) {
+            .static => {
+                m.addIncludePath(self.include_tree.?);
+                m.linkLibrary(self.libssl.?);
+                m.linkLibrary(self.libcrypto.?);
+            },
+            .shared => {
+                m.addIncludePath(self.include_tree.?);
+                // Link the shared .so files dynamically (DT_NEEDED via their
+                // SONAMEs). rpath covers both the installed package layout
+                // (binaries in /usr/bin, libs in /usr/lib/mosquitto) and a
+                // relocatable archive layout ($ORIGIN-relative).
+                m.addObjectFile(self.ssl_so.?);
+                m.addObjectFile(self.crypto_so.?);
+                m.addRPathSpecial("$ORIGIN"); // plugin .so sitting next to the openssl .so
+                m.addRPathSpecial("$ORIGIN/lib"); // archive layout: binary at root, libs in lib/
+                m.addRPathSpecial("$ORIGIN/../lib/mosquitto"); // package layout: /usr/bin -> /usr/lib/mosquitto
+                m.addRPathSpecial("/usr/lib/mosquitto");
+            },
+            .system => {
+                m.linkSystemLibrary("ssl", .{});
+                m.linkSystemLibrary("crypto", .{});
+            },
+        }
+    }
+};
+
+// Convert a vendored static OpenSSL archive into a shared library by force-
+// loading every object (--whole-archive) and exporting its symbols. extra_sos
+// are additional shared libs to link (libssl.so needs libcrypto.so), recorded
+// as DT_NEEDED via their SONAMEs.
+fn opensslStaticToShared(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    static_lib: *std.Build.Step.Compile,
+    soname: []const u8,
+    extra_sos: []const std.Build.LazyPath,
+) std.Build.LazyPath {
+    const triple = target.query.zigTriple(b.allocator) catch @panic("OOM");
+    const cmd = b.addSystemCommand(&.{ b.graph.zig_exe, "cc", "-target", triple, "-shared", "-Wl,-s" });
+    cmd.addArg("-Wl,--whole-archive");
+    cmd.addFileArg(static_lib.getEmittedBin());
+    cmd.addArg("-Wl,--no-whole-archive");
+    for (extra_sos) |so| cmd.addFileArg(so);
+    cmd.addArg(b.fmt("-Wl,-soname,{s}", .{soname}));
+    cmd.addArg("-o");
+    return cmd.addOutputFileArg(soname);
+}
+
 pub fn build(b: *std.Build) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .{};
     const alloc = gpa.allocator();
@@ -8,12 +79,24 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const with_tls = b.option(bool, "WITH_TLS", "Build mosquitto with TLS") orelse true;
+    const openssl_mode = b.option(OpensslMode, "OPENSSL", "How to link OpenSSL: 'static' (bundled into every binary, default), 'shared' (build & ship one shared libssl/libcrypto for all binaries), or 'system' (link the target's system OpenSSL — native builds only)") orelse .static;
     const version = b.option([]const u8, "version", "mosquitto version string") orelse zon.version;
     const with_dynamic_security = b.option(bool, "WITH_DYNAMIC_SECURITY", "Build dynamic-security plugin .so") orelse true;
     const with_persist_sqlite = b.option(bool, "WITH_PERSIST_SQLITE", "Build persist-sqlite plugin .so") orelse true;
     const with_acl_file_plugin = b.option(bool, "WITH_ACL_FILE_PLUGIN", "Build acl-file plugin .so") orelse true;
     const with_password_file_plugin = b.option(bool, "WITH_PASSWORD_FILE_PLUGIN", "Build password-file plugin .so") orelse true;
     const with_sparkplug_aware = b.option(bool, "WITH_SPARKPLUG_AWARE", "Build sparkplug-aware plugin .so") orelse true;
+
+    // Additional mosquitto CLI tools (clients + apps). Each can be toggled
+    // independently. Note: mosquitto_passwd and mosquitto_ctrl require TLS
+    // (OpenSSL) upstream and are skipped automatically when WITH_TLS=false.
+    const with_client_pub = b.option(bool, "WITH_CLIENT_PUB", "Build mosquitto_pub") orelse true;
+    const with_client_sub = b.option(bool, "WITH_CLIENT_SUB", "Build mosquitto_sub") orelse true;
+    const with_client_rr = b.option(bool, "WITH_CLIENT_RR", "Build mosquitto_rr") orelse true;
+    const with_app_passwd = b.option(bool, "WITH_APP_PASSWD", "Build mosquitto_passwd (requires TLS)") orelse true;
+    const with_app_ctrl = b.option(bool, "WITH_APP_CTRL", "Build mosquitto_ctrl (requires TLS)") orelse true;
+    const with_app_db_dump = b.option(bool, "WITH_APP_DB_DUMP", "Build mosquitto_db_dump") orelse true;
+    const with_app_signal = b.option(bool, "WITH_APP_SIGNAL", "Build mosquitto_signal") orelse true;
 
     const mosquitto = b.addExecutable(.{
         .name = "mosquitto",
@@ -50,17 +133,43 @@ pub fn build(b: *std.Build) !void {
     const microhttpd = b.dependency("microhttpd", .{});
     mosquitto.root_module.addIncludePath(microhttpd.path("src/include"));
 
-    // Enable openssl (artifacts stored in outer vars for reuse in plugin builds)
-    var opt_libssl: ?*std.Build.Step.Compile = null;
-    var opt_libcrypto: ?*std.Build.Step.Compile = null;
+    // openssl_link describes how OpenSSL is linked; it is reused by the broker,
+    // plugins and tools. null when TLS is disabled. The vendored OpenSSL is built
+    // once and shared by all binaries: in 'static' mode each statically links it;
+    // in 'shared' mode it is converted to .so files all binaries link; in
+    // 'system' mode no OpenSSL is built (the target's system OpenSSL is used).
+    var openssl_link: ?OpensslLink = null;
     if (with_tls) {
-        const openssl = b.dependency("openssl", .{ .target = target, .optimize = optimize });
-        opt_libssl = openssl.artifact("ssl");
-        opt_libcrypto = openssl.artifact("crypto");
-        mosquitto.root_module.linkLibrary(opt_libssl.?);
-        mosquitto.root_module.linkLibrary(opt_libcrypto.?);
-        mosquitto.root_module.addIncludePath(opt_libssl.?.getEmittedIncludeTree());
-        mosquitto.root_module.addIncludePath(opt_libcrypto.?.getEmittedIncludeTree());
+        switch (openssl_mode) {
+            .system => openssl_link = .{ .mode = .system },
+            .static => {
+                const openssl = b.dependency("openssl", .{ .target = target, .optimize = optimize });
+                const libssl = openssl.artifact("ssl");
+                openssl_link = .{
+                    .mode = .static,
+                    .include_tree = libssl.getEmittedIncludeTree(),
+                    .libssl = libssl,
+                    .libcrypto = openssl.artifact("crypto"),
+                };
+            },
+            .shared => {
+                const openssl = b.dependency("openssl", .{ .target = target, .optimize = optimize });
+                const libssl = openssl.artifact("ssl");
+                const libcrypto = openssl.artifact("crypto");
+                // libcrypto.so.3 first; libssl.so.3 links it (DT_NEEDED).
+                const crypto_so = opensslStaticToShared(b, target, libcrypto, "libcrypto.so.3", &.{});
+                const ssl_so = opensslStaticToShared(b, target, libssl, "libssl.so.3", &.{crypto_so});
+                openssl_link = .{
+                    .mode = .shared,
+                    .include_tree = libssl.getEmittedIncludeTree(),
+                    .ssl_so = ssl_so,
+                    .crypto_so = crypto_so,
+                };
+                b.getInstallStep().dependOn(&b.addInstallLibFile(crypto_so, "libcrypto.so.3").step);
+                b.getInstallStep().dependOn(&b.addInstallLibFile(ssl_so, "libssl.so.3").step);
+            },
+        }
+        openssl_link.?.apply(mosquitto.root_module);
     }
 
     // note: Ideally the source code files should be sorted and the unused files should
@@ -310,8 +419,7 @@ pub fn build(b: *std.Build) !void {
                 "plugins/dynamic-security/tick.c",
             },
             plugin_flags.items,
-            opt_libssl,
-            opt_libcrypto,
+            openssl_link,
         ));
     }
 
@@ -341,8 +449,7 @@ pub fn build(b: *std.Build) !void {
                 "plugins/persist-sqlite/will.c",
             },
             plugin_flags_notls.items,  // no password/TLS needed
-            null,                      // no OpenSSL
-            null,
+            null, // no OpenSSL
         ));
     }
 
@@ -364,8 +471,7 @@ pub fn build(b: *std.Build) !void {
                 "plugins/acl-file/plugin.c",
             },
             plugin_flags_notls.items,  // no password/TLS needed
-            null,                      // no OpenSSL
-            null,
+            null, // no OpenSSL
         ));
     }
 
@@ -387,8 +493,7 @@ pub fn build(b: *std.Build) !void {
                 "plugins/password-file/plugin.c",
             },
             plugin_flags.items,  // -DWITH_TLS enables password hashing
-            opt_libssl,
-            opt_libcrypto,
+            openssl_link,
         ));
     }
 
@@ -409,7 +514,243 @@ pub fn build(b: *std.Build) !void {
                 "plugins/sparkplug-aware/plugin.c",
             },
             plugin_flags_notls.items,  // no password/TLS needed
-            null,                      // no OpenSSL
+            null, // no OpenSSL
+        ));
+    }
+
+    // -------------------------------------------------------------------------
+    // CLI tools — built as standalone executables. The libmosquitto *client*
+    // library (lib/*.c, compiled WITHOUT -DWITH_BROKER) and libcommon sources
+    // are compiled directly into each tool to avoid a runtime dependency on a
+    // shared libmosquitto.so.
+    // -------------------------------------------------------------------------
+
+    // libmosquitto client library sources (the lib/ CMake C_SRC list, minus the
+    // websockets-only picohttpparser dep which is not built here).
+    const lib_client_sources = [_][]const u8{
+        "lib/actions_publish.c",
+        "lib/actions_subscribe.c",
+        "lib/actions_unsubscribe.c",
+        "lib/alias_mosq.c",
+        "lib/callbacks.c",
+        "lib/connect.c",
+        "lib/extended_auth.c",
+        "lib/handle_auth.c",
+        "lib/handle_connack.c",
+        "lib/handle_disconnect.c",
+        "lib/handle_ping.c",
+        "lib/handle_pubackcomp.c",
+        "lib/handle_publish.c",
+        "lib/handle_pubrec.c",
+        "lib/handle_pubrel.c",
+        "lib/handle_suback.c",
+        "lib/handle_unsuback.c",
+        "lib/helpers.c",
+        "lib/http_client.c",
+        "lib/libmosquitto.c",
+        "lib/logging_mosq.c",
+        "lib/loop.c",
+        "lib/messages_mosq.c",
+        "lib/net_mosq_ocsp.c",
+        "lib/net_mosq.c",
+        "lib/net_ws.c",
+        "lib/options.c",
+        "lib/packet_datatypes.c",
+        "lib/packet_mosq.c",
+        "lib/property_mosq.c",
+        "lib/read_handle.c",
+        "lib/send_connect.c",
+        "lib/send_disconnect.c",
+        "lib/send_mosq.c",
+        "lib/send_publish.c",
+        "lib/send_subscribe.c",
+        "lib/send_unsubscribe.c",
+        "lib/socks_mosq.c",
+        "lib/srv_mosq.c",
+        "lib/thread_mosq.c",
+        "lib/tls_mosq.c",
+        "lib/util_mosq.c",
+        "lib/will_mosq.c",
+    };
+    // sources shared by every client (mosquitto_pub/sub/rr)
+    const client_shared_sources = [_][]const u8{
+        "client/client_shared.c",
+        "client/client_props.c",
+    };
+
+    // Flags for the client tools: client mode (no -DWITH_BROKER), TLS optional.
+    var client_flags: std.ArrayList([]const u8) = .empty;
+    defer client_flags.deinit(alloc);
+    if (with_tls) try client_flags.append(alloc, "-DWITH_TLS");
+    try client_flags.append(alloc, plugin_version_flag);
+    try client_flags.append(alloc, "-Wall");
+    try client_flags.append(alloc, "-W");
+
+    if (with_client_pub) {
+        b.installArtifact(buildTool(
+            b,
+            "mosquitto_pub",
+            mosquitto_dep,
+            cjson_dep,
+            &copy_cjson.step,
+            target,
+            optimize,
+            &(lib_client_sources ++ libcommon_full_sources ++ client_shared_sources ++ [_][]const u8{
+                "client/pub_client.c",
+                "client/pub_shared.c",
+            }),
+            client_flags.items,
+            true, // needs cJSON
+            openssl_link,
+        ));
+    }
+
+    if (with_client_sub) {
+        b.installArtifact(buildTool(
+            b,
+            "mosquitto_sub",
+            mosquitto_dep,
+            cjson_dep,
+            &copy_cjson.step,
+            target,
+            optimize,
+            &(lib_client_sources ++ libcommon_full_sources ++ client_shared_sources ++ [_][]const u8{
+                "client/sub_client.c",
+                "client/sub_client_output.c",
+            }),
+            client_flags.items,
+            true,
+            openssl_link,
+        ));
+    }
+
+    if (with_client_rr) {
+        b.installArtifact(buildTool(
+            b,
+            "mosquitto_rr",
+            mosquitto_dep,
+            cjson_dep,
+            &copy_cjson.step,
+            target,
+            optimize,
+            &(lib_client_sources ++ libcommon_full_sources ++ client_shared_sources ++ [_][]const u8{
+                "client/rr_client.c",
+                "client/pub_shared.c",
+                "client/sub_client_output.c",
+            }),
+            client_flags.items,
+            true,
+            openssl_link,
+        ));
+    }
+
+    // mosquitto_db_dump — reads the broker persistence file, so it needs the
+    // broker persist_read sources and -DWITH_BROKER -DWITH_PERSISTENCE.
+    if (with_app_db_dump) {
+        var db_dump_flags: std.ArrayList([]const u8) = .empty;
+        defer db_dump_flags.deinit(alloc);
+        if (with_tls) try db_dump_flags.append(alloc, "-DWITH_TLS");
+        try db_dump_flags.append(alloc, "-DWITH_BROKER");
+        try db_dump_flags.append(alloc, "-DWITH_PERSISTENCE");
+        try db_dump_flags.append(alloc, plugin_version_flag);
+        try db_dump_flags.append(alloc, "-Wall");
+        try db_dump_flags.append(alloc, "-W");
+        b.installArtifact(buildTool(
+            b,
+            "mosquitto_db_dump",
+            mosquitto_dep,
+            cjson_dep,
+            &copy_cjson.step,
+            target,
+            optimize,
+            &(libcommon_json_only_sources ++ [_][]const u8{
+                "apps/db_dump/db_dump.c",
+                "apps/db_dump/json.c",
+                "apps/db_dump/print.c",
+                "apps/db_dump/stubs.c",
+                "lib/packet_datatypes.c",
+                "lib/property_mosq.c",
+                "src/persist_read.c",
+                "src/persist_read_v234.c",
+                "src/persist_read_v5.c",
+                "src/topic_tok.c",
+            }),
+            db_dump_flags.items,
+            true,
+            openssl_link,
+        ));
+    }
+
+    // mosquitto_passwd — requires TLS (OpenSSL) for password hashing.
+    if (with_app_passwd and with_tls) {
+        b.installArtifact(buildTool(
+            b,
+            "mosquitto_passwd",
+            mosquitto_dep,
+            cjson_dep,
+            &copy_cjson.step,
+            target,
+            optimize,
+            &(libcommon_crypto_only_sources ++ [_][]const u8{
+                "apps/mosquitto_passwd/mosquitto_passwd.c",
+                "apps/mosquitto_passwd/get_password.c",
+            }),
+            client_flags.items,
+            false, // no cJSON
+            openssl_link,
+        ));
+    }
+
+    // mosquitto_ctrl — requires TLS. Built without the optional line-editing
+    // shell (WITH_CTRL_SHELL) since libedit/readline is not available here.
+    if (with_app_ctrl and with_tls) {
+        b.installArtifact(buildTool(
+            b,
+            "mosquitto_ctrl",
+            mosquitto_dep,
+            cjson_dep,
+            &copy_cjson.step,
+            target,
+            optimize,
+            &(lib_client_sources ++ libcommon_full_sources ++ [_][]const u8{
+                "apps/mosquitto_ctrl/mosquitto_ctrl.c",
+                "apps/mosquitto_ctrl/broker.c",
+                "apps/mosquitto_ctrl/client.c",
+                "apps/mosquitto_ctrl/dynsec.c",
+                "apps/mosquitto_ctrl/dynsec_client.c",
+                "apps/mosquitto_ctrl/dynsec_group.c",
+                "apps/mosquitto_ctrl/dynsec_role.c",
+                "apps/mosquitto_ctrl/options.c",
+                "apps/mosquitto_passwd/get_password.c",
+                // note: common/json_help.c is already provided by libcommon_full_sources
+            }),
+            client_flags.items,
+            true,
+            openssl_link,
+        ));
+    }
+
+    // mosquitto_signal — standalone, no libmosquitto/libcommon/TLS needed.
+    if (with_app_signal) {
+        var signal_flags: std.ArrayList([]const u8) = .empty;
+        defer signal_flags.deinit(alloc);
+        try signal_flags.append(alloc, plugin_version_flag);
+        try signal_flags.append(alloc, "-Wall");
+        try signal_flags.append(alloc, "-W");
+        b.installArtifact(buildTool(
+            b,
+            "mosquitto_signal",
+            mosquitto_dep,
+            cjson_dep,
+            &copy_cjson.step,
+            target,
+            optimize,
+            &[_][]const u8{
+                "apps/mosquitto_signal/mosquitto_signal.c",
+                "apps/mosquitto_signal/signal_unix.c",
+            },
+            signal_flags.items,
+            false,
             null,
         ));
     }
@@ -428,8 +769,7 @@ fn buildPlugin(
     libcommon_sources: []const []const u8,
     plugin_sources: []const []const u8,
     flags: []const []const u8,
-    opt_libssl: ?*std.Build.Step.Compile,
-    opt_libcrypto: ?*std.Build.Step.Compile,
+    openssl: ?OpensslLink,
 ) *std.Build.Step.Compile {
     const plugin = b.addLibrary(.{
         .name = name,
@@ -463,10 +803,8 @@ fn buildPlugin(
         plugin.root_module.addIncludePath(sqlite_dep.path("."));
         plugin.root_module.addCSourceFile(.{ .file = sqlite_dep.path("sqlite3.c"), .flags = &.{} });
     }
-    if (opt_libssl) |libssl| {
-        plugin.root_module.linkLibrary(libssl);
-        plugin.root_module.linkLibrary(opt_libcrypto.?);
-        plugin.root_module.addIncludePath(libssl.getEmittedIncludeTree());
+    if (openssl) |o| {
+        o.apply(plugin.root_module);
     }
     for (libcommon_sources) |src| {
         plugin.root_module.addCSourceFile(.{ .file = mosquitto_dep.path(src), .flags = flags });
@@ -476,6 +814,55 @@ fn buildPlugin(
     }
     plugin.root_module.link_libc = true;
     return plugin;
+}
+
+fn buildTool(
+    b: *std.Build,
+    name: []const u8,
+    mosquitto_dep: *std.Build.Dependency,
+    cjson_dep: *std.Build.Dependency,
+    copy_cjson_step: *std.Build.Step, // mosquitto.h -> libcommon_cjson.h -> cjson/cJSON.h
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sources: []const []const u8,
+    flags: []const []const u8,
+    needs_cjson: bool,
+    openssl: ?OpensslLink,
+) *std.Build.Step.Compile {
+    const exe = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    exe.root_module.addIncludePath(mosquitto_dep.path(""));
+    exe.root_module.addIncludePath(mosquitto_dep.path("include"));
+    exe.root_module.addIncludePath(mosquitto_dep.path("src"));
+    exe.root_module.addIncludePath(mosquitto_dep.path("lib"));
+    exe.root_module.addIncludePath(mosquitto_dep.path("libcommon"));
+    exe.root_module.addIncludePath(mosquitto_dep.path("common"));
+    exe.root_module.addIncludePath(mosquitto_dep.path("deps"));
+    exe.root_module.addIncludePath(mosquitto_dep.path("client"));
+    exe.root_module.addIncludePath(mosquitto_dep.path("apps/mosquitto_passwd"));
+    exe.root_module.addIncludePath(mosquitto_dep.path("plugins/common"));
+    exe.root_module.addIncludePath(mosquitto_dep.path("plugins/dynamic-security"));
+    // b.path(".") provides cjson/cJSON.h (created by copy_cjson_step) for the
+    // mosquitto.h -> libcommon_cjson.h include chain.
+    exe.root_module.addIncludePath(b.path("."));
+    exe.step.dependOn(copy_cjson_step);
+    if (needs_cjson) {
+        exe.root_module.addIncludePath(cjson_dep.path(""));
+        exe.root_module.addCSourceFile(.{ .file = cjson_dep.path("cJSON.c"), .flags = &.{} });
+    }
+    if (openssl) |o| {
+        o.apply(exe.root_module);
+    }
+    for (sources) |src| {
+        exe.root_module.addCSourceFile(.{ .file = mosquitto_dep.path(src), .flags = flags });
+    }
+    exe.root_module.link_libc = true;
+    return exe;
 }
 
 fn buildMicrohttpd(

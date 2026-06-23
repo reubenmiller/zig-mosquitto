@@ -15,6 +15,13 @@ OUTPUT_DIR := "dist"
 # build mosquitto with tls. Accepts either 'true' or 'false'
 export WITH_TLS := env("WITH_TLS", "true")
 
+# How OpenSSL is linked into the GNU builds (see build.zig). Accepts:
+#   static  - bundle ~3MB of OpenSSL into every binary (default, self-contained)
+#   shared  - build & ship one libssl.so.3/libcrypto.so.3 shared by all binaries
+#             (much smaller, still self-contained, works cross-compiled)
+#   system  - link the target's system OpenSSL (native builds only)
+export OPENSSL := env("OPENSSL", "static")
+
 # list supported mosquitto versions
 list-versions:
     @echo "The following mosquitto versions are supported:"
@@ -27,26 +34,55 @@ list-versions:
     @echo
 
 # Resolve the goreleaser config to use for the current VERSION.
-# Only mosquitto versions whose build.zig builds loadable plugins (2.1.x+) get the
-# GNU/glibc (dynamically linked) builds and plugin packaging. Older versions only
-# produce the broker binary, so we derive a musl-only config from .goreleaser.yaml
-# (stripping every build/archive/nfpm whose id contains "gnu") to avoid packaging
-# plugin .so files that were never built. Outputs the config path on stdout.
+# Only mosquitto 2.1.x+ build.zig files build the loadable plugins (and the
+# GNU/glibc dynamically-linked broker needed to load them) and the extra CLI
+# tools (mosquitto_pub/sub/rr/passwd/ctrl/db_dump/signal). Older versions only
+# produce the broker binary, so we derive a musl-broker-only config from
+# .goreleaser.yaml:
+#   - drop every build/archive/nfpm whose id contains "gnu", and
+#   - drop the CLI-tool package contents (src under zig-out/.../bin/mosquitto_*)
+# so we never package artifacts that were never built. Outputs the config path
+# on stdout. Detected via the buildPlugin helper, present only in the
+# feature-rich build.zig files.
 [private]
 _config:
     #!/usr/bin/env bash
     set -euo pipefail
-    if grep -q 'buildPlugin' "build/${VERSION}/build.zig" 2>/dev/null; then
+    has_plugins=false
+    grep -q 'buildPlugin' "build/${VERSION}/build.zig" 2>/dev/null && has_plugins=true
+    openssl_shared=false
+    [ "${OPENSSL:-static}" = "shared" ] && openssl_shared=true
+
+    # Full config only when this version builds plugins AND ships shared OpenSSL.
+    if $has_plugins && $openssl_shared; then
         echo .goreleaser.yaml
         exit 0
     fi
-    command -v yq >/dev/null 2>&1 || { echo "ERROR: yq is required to package mosquitto versions without plugins" >&2; exit 1; }
+
+    command -v yq >/dev/null 2>&1 || { echo "ERROR: yq is required to derive the goreleaser config" >&2; exit 1; }
     out=.goreleaser.generated.yaml
-    yq '
-      del(.builds[]   | select(.id | test("gnu"))) |
-      del(.archives[] | select(.id | test("gnu"))) |
-      del(.nfpms[]    | select(.id | test("gnu")))
-    ' .goreleaser.yaml > "$out"
+    # Use del(...|select(...)) rather than map() so YAML aliases elsewhere in the
+    # contents/files lists are preserved (map() expands them and duplicates the
+    # anchor definitions).
+    expr='.'
+    if ! $has_plugins; then
+        # No plugins / GNU / CLI tools in this version: drop the gnu sections and
+        # the CLI-tool package/archive contents.
+        expr="${expr} |
+          del(.builds[]   | select(.id | test(\"gnu\"))) |
+          del(.archives[] | select(.id | test(\"gnu\"))) |
+          del(.nfpms[]    | select(.id | test(\"gnu\"))) |
+          del(.nfpms[].contents[]  | select((.src // \"\") | test(\"bin/mosquitto_\"))) |
+          del(.archives[].files[]  | select((.src // \"\") | test(\"bin/mosquitto_\")))"
+    fi
+    if ! $openssl_shared; then
+        # OpenSSL is not shipped as a shared lib: drop the libssl/libcrypto .so
+        # contents (they are only produced when OPENSSL=shared).
+        expr="${expr} |
+          del(.nfpms[].contents[] | select((.src // \"\") | test(\"lib/lib(ssl|crypto)[.]so\"))) |
+          del(.archives[].files[] | select((.src // \"\") | test(\"lib/lib(ssl|crypto)[.]so\")))"
+    fi
+    yq "${expr}" .goreleaser.yaml > "$out"
     echo "$out"
 
 # Note: use --parallelism 1 due to a problem when running builds in parallel, most likely

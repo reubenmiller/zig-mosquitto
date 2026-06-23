@@ -52,6 +52,13 @@ builds:
   #
   # GNU libc (dynamically linked) builds
   #
+  # OPENSSL selects how OpenSSL is linked into the GNU binaries (see build.zig):
+  #   - static (default): ~3MB of OpenSSL bundled into every binary.
+  #   - shared: one libssl.so.3/libcrypto.so.3 built & shipped to
+  #     /usr/lib/mosquitto, shared by all binaries via rpath (much smaller, still
+  #     self-contained, works cross-compiled). The .so files are added to the GNU
+  #     package/archive below; the justfile strips them when OPENSSL!=shared.
+  #   - system: link the target's system OpenSSL (native builds only).
   - &build-gnu
     id: mosquitto-gnu
     builder: zig
@@ -69,6 +76,7 @@ builds:
       - --release=small
       - -Doptimize=ReleaseSmall
       - -DWITH_TLS={{ eq (envOrDefault "WITH_TLS" "true") "true" }}
+      - -DOPENSSL={{ envOrDefault "OPENSSL" "static" }}
   - &build-gnu-armv6
     # armv6 gnu
     id: mosquitto-gnu-armv6
@@ -79,6 +87,7 @@ builds:
       - --release=small
       - -Doptimize=ReleaseSmall
       - -DWITH_TLS={{ eq (envOrDefault "WITH_TLS" "true") "true" }}
+      - -DOPENSSL={{ envOrDefault "OPENSSL" "static" }}
       - -Dcpu=arm1176jzf_s
 
 archives:
@@ -88,13 +97,41 @@ archives:
     formats:
       - tar.gz
     name_template: '{{ envOrDefault "PACKAGE_NAME" .ProjectName }}_{{ .Env.VERSION }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ .Arm }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
-  
+    # CLI tools — byproducts of the broker's zig build in zig-out/<target>/bin/.
+    # Placed at the archive root next to the auto-added mosquitto binary. The
+    # whole-list anchor is reused by the armv6 musl archive; the gnu archives
+    # repeat the entries (a whole-list alias can't be merged with the plugin/
+    # openssl files). The justfile strips these for versions without the tools.
+    files: &archive-tool-files
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_pub'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_sub'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_rr'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_passwd'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_ctrl'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_db_dump'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_signal'
+        dst: .
+        strip_parent: true
+
   - id: mosquitto-archive-armv6
     ids:
       - mosquitto-armv6
     formats:
       - tar.gz
     name_template: '{{ envOrDefault "PACKAGE_NAME" .ProjectName }}_{{ .Env.VERSION }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ .Arm }}{{ end }}v6{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+    files: *archive-tool-files
 
   # upx'd archives
   - id: mosquitto-archive-upx
@@ -118,7 +155,7 @@ archives:
     formats:
       - tar.gz
     name_template: '{{ envOrDefault "PACKAGE_NAME_GNU" (print (envOrDefault "PACKAGE_NAME" .ProjectName) "-gnu") }}_{{ .Env.VERSION }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ .Arm }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
-    files: &plugin-so-files
+    files:
       - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_dynamic_security.so'
         dst: lib/
         strip_parent: true
@@ -134,6 +171,36 @@ archives:
       - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_sparkplug_aware.so'
         dst: lib/
         strip_parent: true
+      # shared OpenSSL — only present when OPENSSL=shared (stripped otherwise by
+      # the justfile). The binaries' rpath finds them under lib/ in the archive.
+      - src: 'current/zig-out/{{ .Target }}/lib/libcrypto.so.3'
+        dst: lib/
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/lib/libssl.so.3'
+        dst: lib/
+        strip_parent: true
+      # CLI tools (same set as the musl archive), at the archive root
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_pub'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_sub'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_rr'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_passwd'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_ctrl'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_db_dump'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_signal'
+        dst: .
+        strip_parent: true
 
   - id: mosquitto-archive-gnu-armv6
     ids:
@@ -141,7 +208,52 @@ archives:
     formats:
       - tar.gz
     name_template: '{{ envOrDefault "PACKAGE_NAME_GNU" (print (envOrDefault "PACKAGE_NAME" .ProjectName) "-gnu") }}_{{ .Env.VERSION }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ .Arm }}{{ end }}v6{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
-    files: *plugin-so-files
+    # NOTE: not a YAML alias of the gnu archive's files — the justfile's
+    # del()-based stripping double-processes shared/aliased list nodes and would
+    # corrupt one of them, so this list is repeated verbatim.
+    files:
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_dynamic_security.so'
+        dst: lib/
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_persist_sqlite.so'
+        dst: lib/
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_acl_file.so'
+        dst: lib/
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_password_file.so'
+        dst: lib/
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_sparkplug_aware.so'
+        dst: lib/
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/lib/libcrypto.so.3'
+        dst: lib/
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/lib/libssl.so.3'
+        dst: lib/
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_pub'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_sub'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_rr'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_passwd'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_ctrl'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_db_dump'
+        dst: .
+        strip_parent: true
+      - src: 'current/zig-out/{{ .Target }}/bin/mosquitto_signal'
+        dst: .
+        strip_parent: true
 
 nfpms:
   # note that this is an array of nfpm configs
@@ -238,6 +350,32 @@ nfpms:
         file_info:
           mode: 0755
 
+      # mosquitto CLI tools — byproducts of the broker's `zig build`, found in
+      # zig-out/<target>/bin/. Only 2.1.x+ build.zig builds these, so the
+      # justfile strips these entries (src matches bin/mosquitto_) for older
+      # versions. mosquitto_passwd and mosquitto_ctrl require WITH_TLS=true.
+      - &content-tool-pub
+        src: 'current/zig-out/{{ .Target }}/bin/mosquitto_pub'
+        dst: /usr/bin/mosquitto_pub
+      - &content-tool-sub
+        src: 'current/zig-out/{{ .Target }}/bin/mosquitto_sub'
+        dst: /usr/bin/mosquitto_sub
+      - &content-tool-rr
+        src: 'current/zig-out/{{ .Target }}/bin/mosquitto_rr'
+        dst: /usr/bin/mosquitto_rr
+      - &content-tool-passwd
+        src: 'current/zig-out/{{ .Target }}/bin/mosquitto_passwd'
+        dst: /usr/bin/mosquitto_passwd
+      - &content-tool-ctrl
+        src: 'current/zig-out/{{ .Target }}/bin/mosquitto_ctrl'
+        dst: /usr/bin/mosquitto_ctrl
+      - &content-tool-db-dump
+        src: 'current/zig-out/{{ .Target }}/bin/mosquitto_db_dump'
+        dst: /usr/bin/mosquitto_db_dump
+      - &content-tool-signal
+        src: 'current/zig-out/{{ .Target }}/bin/mosquitto_signal'
+        dst: /usr/bin/mosquitto_signal
+
     scripts:
       preinstall: ./packaging/scripts/preinstall.sh
       postinstall: ./packaging/scripts/postinstall.sh
@@ -284,6 +422,13 @@ nfpms:
       - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_sparkplug_aware.so'
         dst: /usr/lib/mosquitto/mosquitto_sparkplug_aware.so
 
+      # shared OpenSSL — only present when OPENSSL=shared (the justfile strips
+      # these when OPENSSL!=shared). Installed where the binaries' rpath looks.
+      - src: 'current/zig-out/{{ .Target }}/lib/libcrypto.so.3'
+        dst: /usr/lib/mosquitto/libcrypto.so.3
+      - src: 'current/zig-out/{{ .Target }}/lib/libssl.so.3'
+        dst: /usr/lib/mosquitto/libssl.so.3
+
       - *content-certs-readme
       - *content-ca-certificates-readme
       - *content-mosquitto-conf
@@ -291,6 +436,14 @@ nfpms:
       - *content-var-lib
       - *content-systemd
       - *content-sysvinit
+      # CLI tools (same set as the musl package)
+      - *content-tool-pub
+      - *content-tool-sub
+      - *content-tool-rr
+      - *content-tool-passwd
+      - *content-tool-ctrl
+      - *content-tool-db-dump
+      - *content-tool-signal
 
   - #
     <<: *linux-gnu-package-defaults
@@ -301,7 +454,7 @@ nfpms:
 
 upx:
   - # Whether to enable it or not.
-    enabled: true
+    enabled: false
 
     # Filter by build ID.
     ids: [mosquitto-upx, mosquitto-upx-armv6]
