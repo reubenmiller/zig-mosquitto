@@ -156,21 +156,22 @@ archives:
       - tar.gz
     name_template: '{{ envOrDefault "PACKAGE_NAME_GNU" (print (envOrDefault "PACKAGE_NAME" .ProjectName) "-gnu") }}_{{ .Env.VERSION }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ .Arm }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
     files:
-      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_dynamic_security.so'
-        dst: lib/
-        strip_parent: true
-      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_persist_sqlite.so'
-        dst: lib/
-        strip_parent: true
-      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_acl_file.so'
-        dst: lib/
-        strip_parent: true
-      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_password_file.so'
-        dst: lib/
-        strip_parent: true
-      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_sparkplug_aware.so'
-        dst: lib/
-        strip_parent: true
+      # don't include plugins for now
+      # - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_dynamic_security.so'
+      #   dst: lib/
+      #   strip_parent: true
+      # - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_persist_sqlite.so'
+      #   dst: lib/
+      #   strip_parent: true
+      # - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_acl_file.so'
+      #   dst: lib/
+      #   strip_parent: true
+      # - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_password_file.so'
+      #   dst: lib/
+      #   strip_parent: true
+      # - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_sparkplug_aware.so'
+      #   dst: lib/
+      #   strip_parent: true
       # shared OpenSSL — only present when OPENSSL=shared (stripped otherwise by
       # the justfile). The binaries' rpath finds them under lib/ in the archive.
       - src: 'current/zig-out/{{ .Target }}/lib/libcrypto.so.3'
@@ -405,22 +406,23 @@ nfpms:
     # YAML merge keys (<<) cannot concatenate sequences, so the common items are
     # referenced individually via their anchors from *linux-package-defaults.
     contents:
+      # don't include plugins for now
       # mosquitto plugins — each target's .so files live in zig-out/<target>/lib/
       # because goreleaser passes -p zig-out/<target> to zig build.
-      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_dynamic_security.so'
-        dst: /usr/lib/mosquitto/mosquitto_dynamic_security.so
+      # - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_dynamic_security.so'
+      #   dst: /usr/lib/mosquitto/mosquitto_dynamic_security.so
 
-      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_persist_sqlite.so'
-        dst: /usr/lib/mosquitto/mosquitto_persist_sqlite.so
+      # - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_persist_sqlite.so'
+      #   dst: /usr/lib/mosquitto/mosquitto_persist_sqlite.so
 
-      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_acl_file.so'
-        dst: /usr/lib/mosquitto/mosquitto_acl_file.so
+      # - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_acl_file.so'
+      #   dst: /usr/lib/mosquitto/mosquitto_acl_file.so
 
-      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_password_file.so'
-        dst: /usr/lib/mosquitto/mosquitto_password_file.so
+      # - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_password_file.so'
+      #   dst: /usr/lib/mosquitto/mosquitto_password_file.so
 
-      - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_sparkplug_aware.so'
-        dst: /usr/lib/mosquitto/mosquitto_sparkplug_aware.so
+      # - src: 'current/zig-out/{{ .Target }}/lib/libmosquitto_sparkplug_aware.so'
+      #   dst: /usr/lib/mosquitto/mosquitto_sparkplug_aware.so
 
       # shared OpenSSL — only present when OPENSSL=shared (the justfile strips
       # these when OPENSSL!=shared). Installed where the binaries' rpath looks.
