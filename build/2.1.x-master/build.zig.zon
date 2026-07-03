@@ -1,6 +1,6 @@
 .{
     .name = .mosquitto,
-    .version = "2.1.1-master",
+    .version = "2.1.2-master",
     .fingerprint = 0xedaa03191382deac,
     .paths = .{
         "build.zig",

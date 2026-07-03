@@ -76,7 +76,7 @@ builds:
       - --release=small
       - -Doptimize=ReleaseSmall
       - -DWITH_TLS={{ eq (envOrDefault "WITH_TLS" "true") "true" }}
-      - -DOPENSSL={{ envOrDefault "OPENSSL" "static" }}
+      - -DOPENSSL={{ envOrDefault "OPENSSL" "shared" }}
   - &build-gnu-armv6
     # armv6 gnu
     id: mosquitto-gnu-armv6
@@ -87,7 +87,7 @@ builds:
       - --release=small
       - -Doptimize=ReleaseSmall
       - -DWITH_TLS={{ eq (envOrDefault "WITH_TLS" "true") "true" }}
-      - -DOPENSSL={{ envOrDefault "OPENSSL" "static" }}
+      - -DOPENSSL={{ envOrDefault "OPENSSL" "shared" }}
       - -Dcpu=arm1176jzf_s
 
 archives:

@@ -20,7 +20,7 @@ export WITH_TLS := env("WITH_TLS", "true")
 #   shared  - build & ship one libssl.so.3/libcrypto.so.3 shared by all binaries
 #             (much smaller, still self-contained, works cross-compiled)
 #   system  - link the target's system OpenSSL (native builds only)
-export OPENSSL := env("OPENSSL", "static")
+export OPENSSL := env("OPENSSL", "shared")
 
 # list supported mosquitto versions
 list-versions:
