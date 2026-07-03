@@ -4,7 +4,7 @@ set dotenv-load
 export PACKAGE_NAME := env("PACKAGE_NAME", if WITH_TLS == "true" { "tedge-mosquitto" } else { "tedge-mosquitto-notls" })
 
 # package version
-export VERSION := env("VERSION", "2.0.22")
+export VERSION := env("VERSION", "2.1.2")
 
 # package version release suffix
 export REVISION := env("REVISION", "1")
